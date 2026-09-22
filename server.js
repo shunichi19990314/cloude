@@ -19,7 +19,7 @@ const FEEDS = [
 ];
 
 // 簡易キャッシュ(毎回全フィードに取りに行かないように)
-let cache = { updatedAt: null, items: [] };
+let cache = { updatedAt: null, items: [], failed: [] };
 const CACHE_TTL_MS = 10 * 60 * 1000; // 10分
 
 async function fetchAllFeeds() {
@@ -49,9 +49,9 @@ async function fetchAllFeeds() {
   return { items, failed };
 }
 
-async function getNews() {
+async function getNews(force = false) {
   const now = Date.now();
-  if (cache.updatedAt && now - cache.updatedAt < CACHE_TTL_MS) {
+  if (!force && cache.updatedAt && now - cache.updatedAt < CACHE_TTL_MS) {
     return cache;
   }
   const { items, failed } = await fetchAllFeeds();
@@ -64,27 +64,23 @@ function escapeHtml(str) {
     .replace(/&/g, "&amp;")
     .replace(/</g, "&lt;")
     .replace(/>/g, "&gt;")
-    .replace(/"/g, "&quot;");
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&#39;");
 }
 
-function renderPage({ items, failed, updatedAt }) {
-  const cards = items
-    .map(
-      (item) => `
-        <article class="card">
-          <span class="source">${escapeHtml(item.source)}</span>
-          <h2><a href="${escapeHtml(item.link)}" target="_blank" rel="noopener noreferrer">${escapeHtml(
-        item.title
-      )}</a></h2>
-          ${item.contentSnippet ? `<p>${escapeHtml(item.contentSnippet)}...</p>` : ""}
-          <time>${item.pubDate ? new Date(item.pubDate).toLocaleString("ja-JP") : ""}</time>
-        </article>`
-    )
-    .join("");
+const SOURCE_NAMES = FEEDS.map((f) => f.name);
 
+function renderPage({ items, failed, updatedAt }) {
   const failedNotice = failed && failed.length
     ? `<p class="notice">取得に失敗したフィード: ${escapeHtml(failed.join(", "))}</p>`
     : "";
+
+  const sourceChips = SOURCE_NAMES
+    .map((name) => `<button class="chip" data-source="${escapeHtml(name)}">${escapeHtml(name)}</button>`)
+    .join("");
+
+  // クライアント側で使うため、記事データをそのままJSONとして埋め込む
+  const itemsJson = JSON.stringify(items).replace(/</g, "\\u003c");
 
   return `<!DOCTYPE html>
 <html lang="ja">
@@ -100,6 +96,16 @@ function renderPage({ items, failed, updatedAt }) {
     --muted: #6e6e73;
     --accent: #0066cc;
     --border: #e5e5e7;
+    --chip-bg: #ffffff;
+  }
+  html[data-theme="dark"] {
+    --bg: #121214;
+    --card-bg: #1c1c1f;
+    --text: #f2f2f2;
+    --muted: #9a9a9e;
+    --accent: #5b9dff;
+    --border: #2e2e32;
+    --chip-bg: #1c1c1f;
   }
   * { box-sizing: border-box; }
   body {
@@ -107,18 +113,62 @@ function renderPage({ items, failed, updatedAt }) {
     font-family: -apple-system, "Hiragino Kaku Gothic ProN", "Yu Gothic", sans-serif;
     background: var(--bg);
     color: var(--text);
+    transition: background 0.2s, color 0.2s;
   }
   header {
     background: var(--card-bg);
     border-bottom: 1px solid var(--border);
-    padding: 24px 20px;
-    text-align: center;
+    padding: 18px 20px;
     position: sticky;
     top: 0;
     z-index: 10;
   }
-  header h1 { margin: 0 0 4px; font-size: 1.6rem; }
-  header p { margin: 0; color: var(--muted); font-size: 0.85rem; }
+  .header-top {
+    max-width: 900px;
+    margin: 0 auto 12px;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+  }
+  .header-top-titles { text-align: left; }
+  header h1 { margin: 0 0 2px; font-size: 1.4rem; }
+  header p#updated-at { margin: 0; color: var(--muted); font-size: 0.78rem; }
+  .header-buttons { display: flex; gap: 8px; flex-shrink: 0; }
+  .icon-btn {
+    border: 1px solid var(--border);
+    background: var(--chip-bg);
+    color: var(--text);
+    border-radius: 8px;
+    padding: 7px 12px;
+    font-size: 0.85rem;
+    cursor: pointer;
+    white-space: nowrap;
+  }
+  .icon-btn:hover { border-color: var(--accent); }
+  .icon-btn.active { background: var(--accent); color: #fff; border-color: var(--accent); }
+  .controls { max-width: 900px; margin: 0 auto; display: flex; flex-direction: column; gap: 10px; }
+  #search {
+    width: 100%;
+    padding: 10px 14px;
+    border-radius: 10px;
+    border: 1px solid var(--border);
+    background: var(--card-bg);
+    color: var(--text);
+    font-size: 0.9rem;
+  }
+  #search:focus { outline: none; border-color: var(--accent); }
+  .chips { display: flex; flex-wrap: wrap; gap: 6px; }
+  .chip {
+    border: 1px solid var(--border);
+    background: var(--chip-bg);
+    color: var(--muted);
+    border-radius: 999px;
+    padding: 5px 12px;
+    font-size: 0.75rem;
+    cursor: pointer;
+  }
+  .chip.active { background: var(--accent); color: #fff; border-color: var(--accent); }
   main {
     max-width: 900px;
     margin: 0 auto;
@@ -131,21 +181,33 @@ function renderPage({ items, failed, updatedAt }) {
     main { grid-template-columns: 1fr 1fr; }
   }
   .card {
+    position: relative;
     background: var(--card-bg);
     border: 1px solid var(--border);
     border-radius: 12px;
     padding: 16px 18px;
   }
+  .card-top { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
   .source {
     display: inline-block;
     font-size: 0.72rem;
     font-weight: 600;
     color: var(--accent);
-    background: rgba(0,102,204,0.08);
+    background: rgba(91,157,255,0.12);
     padding: 2px 8px;
     border-radius: 999px;
     margin-bottom: 8px;
   }
+  .bookmark-btn {
+    border: none;
+    background: none;
+    font-size: 1.1rem;
+    cursor: pointer;
+    color: var(--muted);
+    line-height: 1;
+    padding: 0 0 8px;
+  }
+  .bookmark-btn.active { color: #f5a623; }
   .card h2 { margin: 0 0 8px; font-size: 1.02rem; line-height: 1.4; }
   .card h2 a { color: var(--text); text-decoration: none; }
   .card h2 a:hover { color: var(--accent); }
@@ -153,11 +215,12 @@ function renderPage({ items, failed, updatedAt }) {
   .card time { font-size: 0.75rem; color: var(--muted); }
   .notice {
     max-width: 900px;
-    margin: 0 auto;
+    margin: 10px auto 0;
     padding: 0 20px;
     color: #b45309;
     font-size: 0.8rem;
   }
+  .empty { padding: 0 18px; color: var(--muted); }
   footer {
     text-align: center;
     padding: 24px;
@@ -168,14 +231,192 @@ function renderPage({ items, failed, updatedAt }) {
 </head>
 <body>
   <header>
-    <h1>ニュースまとめ</h1>
-    <p>最終更新: ${updatedAt ? new Date(updatedAt).toLocaleString("ja-JP") : "-"}(10分ごとに自動更新)</p>
+    <div class="header-top">
+      <div class="header-top-titles">
+        <h1>ニュースまとめ</h1>
+        <p id="updated-at">最終更新: ${updatedAt ? new Date(updatedAt).toLocaleString("ja-JP") : "-"}</p>
+      </div>
+      <div class="header-buttons">
+        <button id="refresh-btn" class="icon-btn" title="今すぐ更新">🔄 更新</button>
+        <button id="bookmark-filter-btn" class="icon-btn" title="お気に入りのみ表示">⭐ お気に入り</button>
+        <button id="theme-btn" class="icon-btn" title="ダークモード切り替え">🌙</button>
+      </div>
+    </div>
+    <div class="controls">
+      <input id="search" type="text" placeholder="キーワードで検索(タイトル・要約)" autocomplete="off" />
+      <div class="chips" id="source-chips">
+        <button class="chip active" data-source="__all__">すべて</button>
+        ${sourceChips}
+      </div>
+    </div>
   </header>
   ${failedNotice}
-  <main>
-    ${cards || "<p style='padding:0 18px;color:var(--muted);'>現在取得できる記事がありません。</p>"}
-  </main>
+  <main id="news-list"></main>
   <footer>複数のRSSフィードから自動収集しています。各記事の著作権は配信元に帰属します。</footer>
+
+<script>
+(function () {
+  var STORAGE_BOOKMARKS = "news-aggregator:bookmarks";
+  var STORAGE_THEME = "news-aggregator:theme";
+
+  var state = {
+    items: ${itemsJson},
+    query: "",
+    activeSource: "__all__",
+    bookmarksOnly: false,
+    bookmarks: loadBookmarks(),
+  };
+
+  function loadBookmarks() {
+    try {
+      return JSON.parse(localStorage.getItem(STORAGE_BOOKMARKS) || "[]");
+    } catch (e) {
+      return [];
+    }
+  }
+  function saveBookmarks() {
+    localStorage.setItem(STORAGE_BOOKMARKS, JSON.stringify(state.bookmarks));
+  }
+  function isBookmarked(link) {
+    return state.bookmarks.indexOf(link) !== -1;
+  }
+  function toggleBookmark(link) {
+    var idx = state.bookmarks.indexOf(link);
+    if (idx === -1) state.bookmarks.push(link);
+    else state.bookmarks.splice(idx, 1);
+    saveBookmarks();
+    render();
+  }
+
+  function escapeHtml(str) {
+    return String(str)
+      .replace(/&/g, "&amp;")
+      .replace(/</g, "&lt;")
+      .replace(/>/g, "&gt;")
+      .replace(/"/g, "&quot;")
+      .replace(/'/g, "&#39;");
+  }
+
+  function applyTheme(theme) {
+    document.documentElement.setAttribute("data-theme", theme);
+    var btn = document.getElementById("theme-btn");
+    btn.textContent = theme === "dark" ? "☀️" : "🌙";
+  }
+
+  function render() {
+    var q = state.query.trim().toLowerCase();
+    var filtered = state.items.filter(function (item) {
+      if (state.activeSource !== "__all__" && item.source !== state.activeSource) return false;
+      if (state.bookmarksOnly && !isBookmarked(item.link)) return false;
+      if (q) {
+        var haystack = (item.title + " " + (item.contentSnippet || "")).toLowerCase();
+        if (haystack.indexOf(q) === -1) return false;
+      }
+      return true;
+    });
+
+    var list = document.getElementById("news-list");
+    if (filtered.length === 0) {
+      list.innerHTML = "<p class='empty'>条件に一致する記事がありません。</p>";
+      return;
+    }
+
+    list.innerHTML = filtered
+      .map(function (item) {
+        var bookmarked = isBookmarked(item.link);
+        var dateStr = item.pubDate ? new Date(item.pubDate).toLocaleString("ja-JP") : "";
+        return (
+          "<article class='card'>" +
+          "<div class='card-top'>" +
+          "<span class='source'>" + escapeHtml(item.source) + "</span>" +
+          "<button class='bookmark-btn" + (bookmarked ? " active" : "") + "' data-link='" + escapeHtml(item.link) + "' title='お気に入り登録'>" +
+          (bookmarked ? "★" : "☆") +
+          "</button>" +
+          "</div>" +
+          "<h2><a href='" + escapeHtml(item.link) + "' target='_blank' rel='noopener noreferrer'>" + escapeHtml(item.title) + "</a></h2>" +
+          (item.contentSnippet ? "<p>" + escapeHtml(item.contentSnippet) + "...</p>" : "") +
+          "<time>" + dateStr + "</time>" +
+          "</article>"
+        );
+      })
+      .join("");
+
+    Array.prototype.forEach.call(list.querySelectorAll(".bookmark-btn"), function (btn) {
+      btn.addEventListener("click", function () {
+        toggleBookmark(btn.getAttribute("data-link"));
+      });
+    });
+  }
+
+  async function refresh(force) {
+    var refreshBtn = document.getElementById("refresh-btn");
+    refreshBtn.disabled = true;
+    refreshBtn.textContent = "🔄 更新中...";
+    try {
+      var res = await fetch("/api/news" + (force ? "?force=1" : ""));
+      var data = await res.json();
+      state.items = data.items || [];
+      document.getElementById("updated-at").textContent =
+        "最終更新: " + (data.updatedAt ? new Date(data.updatedAt).toLocaleString("ja-JP") : "-");
+      render();
+    } catch (e) {
+      // 取得失敗時は現在の表示を維持
+    } finally {
+      refreshBtn.disabled = false;
+      refreshBtn.textContent = "🔄 更新";
+    }
+  }
+
+  // 検索
+  document.getElementById("search").addEventListener("input", function (e) {
+    state.query = e.target.value;
+    render();
+  });
+
+  // ソースフィルタ
+  document.getElementById("source-chips").addEventListener("click", function (e) {
+    var btn = e.target.closest(".chip");
+    if (!btn) return;
+    state.activeSource = btn.getAttribute("data-source");
+    Array.prototype.forEach.call(document.querySelectorAll("#source-chips .chip"), function (c) {
+      c.classList.toggle("active", c === btn);
+    });
+    render();
+  });
+
+  // お気に入りのみ表示
+  document.getElementById("bookmark-filter-btn").addEventListener("click", function () {
+    state.bookmarksOnly = !state.bookmarksOnly;
+    this.classList.toggle("active", state.bookmarksOnly);
+    render();
+  });
+
+  // ダークモード
+  document.getElementById("theme-btn").addEventListener("click", function () {
+    var current = document.documentElement.getAttribute("data-theme") === "dark" ? "dark" : "light";
+    var next = current === "dark" ? "light" : "dark";
+    localStorage.setItem(STORAGE_THEME, next);
+    applyTheme(next);
+  });
+
+  // 手動更新
+  document.getElementById("refresh-btn").addEventListener("click", function () {
+    refresh(true);
+  });
+
+  // 初期テーマ適用(OS設定 or 保存済み設定)
+  var savedTheme = localStorage.getItem(STORAGE_THEME);
+  if (!savedTheme) {
+    savedTheme = window.matchMedia && window.matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light";
+  }
+  applyTheme(savedTheme);
+
+  render();
+
+  // 5分ごとに自動更新(ページ再読み込みなし)
+  setInterval(function () { refresh(false); }, 5 * 60 * 1000);
+})();
+</script>
 </body>
 </html>`;
 }
@@ -192,10 +433,11 @@ app.get("/", async (req, res) => {
 // ヘルスチェック用(Renderのヘルスチェックに利用可能)
 app.get("/health", (req, res) => res.status(200).send("ok"));
 
-// JSON APIとしても取得できるようにしておく
+// JSON APIとしても取得できるようにしておく。?force=1 でキャッシュを無視して再取得。
 app.get("/api/news", async (req, res) => {
   try {
-    const data = await getNews();
+    const force = req.query.force === "1";
+    const data = await getNews(force);
     res.json(data);
   } catch (err) {
     res.status(500).json({ error: "failed to fetch news" });
