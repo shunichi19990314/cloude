@@ -1,6 +1,6 @@
 # ニュースまとめサイト (news-aggregator)
 
-複数のRSSフィード(NHK、Yahoo!ニュース、ITmedia、Reuters、BBCなど)を10分おきにまとめて取得し、
+複数のRSSフィード(NHK、Yahoo!ニュース、ITmedia、The Guardian、BBCなど)を10分おきにまとめて取得し、
 1つのページに一覧表示するシンプルなNode.js(Express)製Webアプリです。
 
 ## 機能

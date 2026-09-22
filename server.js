@@ -14,7 +14,7 @@ const FEEDS = [
   { name: "NHKニュース", url: "https://www3.nhk.or.jp/rss/news/cat0.xml" },
   { name: "Yahoo!ニュース 主要", url: "https://news.yahoo.co.jp/rss/topics/top-picks.xml" },
   { name: "ITmedia News", url: "https://rss.itmedia.co.jp/rss/2.0/news_bursts.xml" },
-  { name: "Reuters World", url: "http://feeds.reuters.com/Reuters/worldNews" },
+  { name: "The Guardian World", url: "https://www.theguardian.com/world/rss" },
   { name: "BBC News", url: "http://feeds.bbci.co.uk/news/rss.xml" },
 ];
 
