@@ -1,5 +1,7 @@
 const express = require("express");
 const Parser = require("rss-parser");
+const { JSDOM } = require("jsdom");
+const { Readability } = require("@mozilla/readability");
 
 const app = express();
 const parser = new Parser({
@@ -17,6 +19,28 @@ const FEEDS = [
   { name: "The Guardian World", url: "https://www.theguardian.com/world/rss" },
   { name: "BBC News", url: "http://feeds.bbci.co.uk/news/rss.xml" },
 ];
+
+// 記事本文取得を許可するドメイン(SSRF対策。上記フィードの配信元ドメインのみ許可)
+const ALLOWED_ARTICLE_HOST_SUFFIXES = [
+  "nhk.or.jp",
+  "yahoo.co.jp",
+  "itmedia.co.jp",
+  "theguardian.com",
+  "bbc.co.uk",
+  "bbc.com",
+];
+
+function isAllowedArticleUrl(urlStr) {
+  try {
+    const u = new URL(urlStr);
+    if (u.protocol !== "http:" && u.protocol !== "https:") return false;
+    return ALLOWED_ARTICLE_HOST_SUFFIXES.some(
+      (suffix) => u.hostname === suffix || u.hostname.endsWith("." + suffix)
+    );
+  } catch (e) {
+    return false;
+  }
+}
 
 // 簡易キャッシュ(毎回全フィードに取りに行かないように)
 let cache = { updatedAt: null, items: [], failed: [] };
@@ -69,6 +93,7 @@ function escapeHtml(str) {
 }
 
 const SOURCE_NAMES = FEEDS.map((f) => f.name);
+const ARTICLE_EXCERPT_LIMIT = 2000;
 
 function renderPage({ items, failed, updatedAt }) {
   const failedNotice = failed && failed.length
@@ -209,8 +234,12 @@ function renderPage({ items, failed, updatedAt }) {
   }
   .bookmark-btn.active { color: #f5a623; }
   .card h2 { margin: 0 0 8px; font-size: 1.02rem; line-height: 1.4; }
-  .card h2 a { color: var(--text); text-decoration: none; }
-  .card h2 a:hover { color: var(--accent); }
+  .card h2 a.article-link {
+    color: var(--text);
+    text-decoration: none;
+    cursor: pointer;
+  }
+  .card h2 a.article-link:hover { color: var(--accent); }
   .card p { margin: 0 0 8px; font-size: 0.85rem; color: var(--muted); }
   .card time { font-size: 0.75rem; color: var(--muted); }
   .notice {
@@ -225,8 +254,61 @@ function renderPage({ items, failed, updatedAt }) {
     text-align: center;
     padding: 24px;
     color: var(--muted);
-    font-size: 0.75rem;
+    font-size: 0.72rem;
+    max-width: 700px;
+    margin: 0 auto;
   }
+
+  /* 記事リーダーモーダル */
+  .modal-overlay {
+    position: fixed;
+    inset: 0;
+    background: rgba(0,0,0,0.55);
+    display: flex;
+    align-items: flex-start;
+    justify-content: center;
+    padding: 48px 16px;
+    z-index: 100;
+    overflow-y: auto;
+  }
+  .modal-overlay.hidden { display: none; }
+  .modal {
+    position: relative;
+    background: var(--card-bg);
+    color: var(--text);
+    max-width: 680px;
+    width: 100%;
+    border-radius: 14px;
+    padding: 30px 26px 26px;
+    box-shadow: 0 20px 60px rgba(0,0,0,0.35);
+  }
+  .modal-close {
+    position: absolute;
+    top: 10px;
+    right: 10px;
+    border: none;
+    background: none;
+    font-size: 1.5rem;
+    cursor: pointer;
+    color: var(--muted);
+    line-height: 1;
+    padding: 6px 10px;
+  }
+  .modal-close:hover { color: var(--text); }
+  #modal-body h2 { margin: 6px 0 10px; font-size: 1.25rem; line-height: 1.45; padding-right: 24px; }
+  .modal-byline { color: var(--muted); font-size: 0.8rem; margin: 0 0 14px; }
+  .modal-text p { margin: 0 0 14px; line-height: 1.85; font-size: 0.92rem; }
+  .modal-loading, .modal-error { color: var(--muted); font-size: 0.9rem; }
+  .modal-truncated { color: var(--muted); font-size: 0.78rem; margin-top: 2px; }
+  .modal-external {
+    display: inline-block;
+    margin-top: 18px;
+    color: var(--accent);
+    text-decoration: none;
+    font-size: 0.85rem;
+    font-weight: 600;
+  }
+  .modal-external:hover { text-decoration: underline; }
 </style>
 </head>
 <body>
@@ -252,7 +334,17 @@ function renderPage({ items, failed, updatedAt }) {
   </header>
   ${failedNotice}
   <main id="news-list"></main>
-  <footer>複数のRSSフィードから自動収集しています。各記事の著作権は配信元に帰属します。</footer>
+  <footer>
+    複数のRSSフィードから自動収集しています。記事タイトルをクリックすると本文の冒頭をこのページ内で表示します(個人利用向けの簡易リーダー)。
+    配信元の設定により表示できない場合は、自動的に元のページへのリンクを表示します。各記事の著作権は配信元に帰属します。
+  </footer>
+
+  <div id="article-modal" class="modal-overlay hidden">
+    <div class="modal">
+      <button id="modal-close" class="modal-close" aria-label="閉じる">×</button>
+      <div id="modal-body"></div>
+    </div>
+  </div>
 
 <script>
 (function () {
@@ -333,20 +425,88 @@ function renderPage({ items, failed, updatedAt }) {
           (bookmarked ? "★" : "☆") +
           "</button>" +
           "</div>" +
-          "<h2><a href='" + escapeHtml(item.link) + "' target='_blank' rel='noopener noreferrer'>" + escapeHtml(item.title) + "</a></h2>" +
+          "<h2><a href='" + escapeHtml(item.link) + "' class='article-link' data-link='" + escapeHtml(item.link) + "'>" + escapeHtml(item.title) + "</a></h2>" +
           (item.contentSnippet ? "<p>" + escapeHtml(item.contentSnippet) + "...</p>" : "") +
           "<time>" + dateStr + "</time>" +
           "</article>"
         );
       })
       .join("");
-
-    Array.prototype.forEach.call(list.querySelectorAll(".bookmark-btn"), function (btn) {
-      btn.addEventListener("click", function () {
-        toggleBookmark(btn.getAttribute("data-link"));
-      });
-    });
   }
+
+  // 記事一覧内のクリックをまとめて処理(ブックマーク / 記事を読む)
+  document.getElementById("news-list").addEventListener("click", function (e) {
+    var bookmarkBtn = e.target.closest(".bookmark-btn");
+    if (bookmarkBtn) {
+      toggleBookmark(bookmarkBtn.getAttribute("data-link"));
+      return;
+    }
+    var articleLink = e.target.closest(".article-link");
+    if (articleLink) {
+      // 修飾キー付きクリック・中クリックはブラウザの標準動作(新しいタブで開く等)に任せる
+      if (e.button !== 0 || e.metaKey || e.ctrlKey || e.shiftKey || e.altKey) return;
+      e.preventDefault();
+      var href = articleLink.getAttribute("data-link");
+      var item = state.items.find(function (i) { return i.link === href; });
+      if (item) openArticleModal(item);
+    }
+  });
+
+  function openArticleModal(item) {
+    var overlay = document.getElementById("article-modal");
+    var body = document.getElementById("modal-body");
+    overlay.classList.remove("hidden");
+    document.body.style.overflow = "hidden";
+
+    body.innerHTML =
+      "<span class='source'>" + escapeHtml(item.source) + "</span>" +
+      "<h2>" + escapeHtml(item.title) + "</h2>" +
+      "<p class='modal-loading'>記事を読み込んでいます...</p>";
+
+    fetch("/api/article?url=" + encodeURIComponent(item.link))
+      .then(function (r) { return r.json(); })
+      .then(function (data) {
+        if (!data.ok) {
+          body.innerHTML =
+            "<span class='source'>" + escapeHtml(item.source) + "</span>" +
+            "<h2>" + escapeHtml(item.title) + "</h2>" +
+            "<p class='modal-error'>この記事はページ内で表示できませんでした(配信元の制限などが理由です)。</p>" +
+            "<a class='modal-external' href='" + escapeHtml(item.link) + "' target='_blank' rel='noopener noreferrer'>元のページを新しいタブで開く →</a>";
+          return;
+        }
+        var paragraphs = data.text
+          .split(/\\n+/)
+          .filter(function (p) { return p.trim().length > 0; })
+          .map(function (p) { return "<p>" + escapeHtml(p) + "</p>"; })
+          .join("");
+        body.innerHTML =
+          "<span class='source'>" + escapeHtml(item.source) + "</span>" +
+          "<h2>" + escapeHtml(data.title || item.title) + "</h2>" +
+          (data.byline ? "<p class='modal-byline'>" + escapeHtml(data.byline) + "</p>" : "") +
+          "<div class='modal-text'>" + paragraphs + "</div>" +
+          (data.truncated ? "<p class='modal-truncated'>(記事冒頭のみ表示しています。続きは元のページでご覧ください)</p>" : "") +
+          "<a class='modal-external' href='" + escapeHtml(item.link) + "' target='_blank' rel='noopener noreferrer'>元のページで全文を読む →</a>";
+      })
+      .catch(function () {
+        body.innerHTML =
+          "<span class='source'>" + escapeHtml(item.source) + "</span>" +
+          "<h2>" + escapeHtml(item.title) + "</h2>" +
+          "<p class='modal-error'>読み込み中にエラーが発生しました。</p>" +
+          "<a class='modal-external' href='" + escapeHtml(item.link) + "' target='_blank' rel='noopener noreferrer'>元のページを新しいタブで開く →</a>";
+      });
+  }
+
+  function closeModal() {
+    document.getElementById("article-modal").classList.add("hidden");
+    document.body.style.overflow = "";
+  }
+  document.getElementById("modal-close").addEventListener("click", closeModal);
+  document.getElementById("article-modal").addEventListener("click", function (e) {
+    if (e.target === this) closeModal();
+  });
+  document.addEventListener("keydown", function (e) {
+    if (e.key === "Escape") closeModal();
+  });
 
   async function refresh(force) {
     var refreshBtn = document.getElementById("refresh-btn");
@@ -441,6 +601,55 @@ app.get("/api/news", async (req, res) => {
     res.json(data);
   } catch (err) {
     res.status(500).json({ error: "failed to fetch news" });
+  }
+});
+
+// 記事本文をサーバー側で取得し、要点を抽出してページ内リーダーに返す。
+// 許可ドメイン(フィード配信元)以外への取得は行わない(SSRF対策)。
+app.get("/api/article", async (req, res) => {
+  const url = req.query.url;
+  if (!url || !isAllowedArticleUrl(url)) {
+    return res.status(400).json({ ok: false, reason: "invalid_url" });
+  }
+
+  try {
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), 8000);
+    const response = await fetch(url, {
+      headers: { "User-Agent": "Mozilla/5.0 (news-aggregator reader)" },
+      signal: controller.signal,
+    });
+    clearTimeout(timeoutId);
+
+    if (!response.ok) {
+      return res.json({ ok: false, reason: "fetch_failed" });
+    }
+
+    const html = await response.text();
+    const dom = new JSDOM(html, { url });
+    const reader = new Readability(dom.window.document);
+    const article = reader.parse();
+
+    if (!article || !article.textContent || article.textContent.trim().length < 50) {
+      return res.json({ ok: false, reason: "extract_failed" });
+    }
+
+    let text = article.textContent.trim().replace(/\n{3,}/g, "\n\n");
+    let truncated = false;
+    if (text.length > ARTICLE_EXCERPT_LIMIT) {
+      text = text.slice(0, ARTICLE_EXCERPT_LIMIT);
+      truncated = true;
+    }
+
+    res.json({
+      ok: true,
+      title: article.title || "",
+      byline: article.byline || "",
+      text,
+      truncated,
+    });
+  } catch (err) {
+    res.json({ ok: false, reason: "fetch_error" });
   }
 });
 
